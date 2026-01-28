@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+joblib
+jupyter
+requests
+openmeteo-requests
+requests-cache
+retry-requests
