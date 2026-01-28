@@ -3,49 +3,65 @@ import pandas as pd
 import joblib
 import os
 import datetime
-import time
 
-# --- CONFIGURATION ---
+# --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="Turkey AI Weather Forecast",
     page_icon="🌤️",
     layout="wide"
 )
 
-# --- MAP & TITLE CSS ---
+# --- 2. UI CUSTOMIZATION (CSS) ---
 st.markdown("""
 <style>
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 0rem !important;
+    }
+    div.stMarkdown {
+        margin-bottom: -10px !important;
+    }
+    hr {
+        margin-top: 0px !important;
+        margin-bottom: 15px !important;
+    }
+
+    [data-testid="stMap"] {
+        height: 350px !important;
+        border-radius: 12px;
+    }
     .stDeckGlJsonChart {
-        height: 500px !important;
+        height: 350px !important;
     }
-    .centered-title {
+
+    .main-title {
         text-align: center;
-        font-weight: bold;
-        color: #ff4b4b; /* Streamlit kırmızısı */
+        color: #ff4b4b;
+        margin-bottom: 0px;
+        padding-bottom: 0px;
     }
-    .centered-text {
+    .sub-title {
         text-align: center;
-        font-size: 1.1rem;
+        color: #555;
+        font-size: 0.95rem;
+        margin-top: -5px;
+        margin-bottom: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- MODEL METADATA (CONSTANTS) ---
+# --- 3. CONSTANTS & LOADER ---
 MODEL_MAE = 3.57
 MODEL_ACCURACY = 60.83
-
-# File Paths
 REGRESSOR_FILE = "temperature_model.pkl"
 CLASSIFIER_FILE = "weather_classifier.pkl"
 LOCATION_FILE = "data/locations.csv"
 
 
-# --- SYSTEM LOADER ---
 @st.cache_resource
 def load_system():
     if not os.path.exists(REGRESSOR_FILE) or not os.path.exists(CLASSIFIER_FILE):
-        return None, None, None, "❌ Error: Model files not found."
-
+        return None, None, None, "❌ Error: AI Models not found."
     try:
         reg = joblib.load(REGRESSOR_FILE)
         clf = joblib.load(CLASSIFIER_FILE)
@@ -58,14 +74,9 @@ def load_system():
 reg_model, class_model, locations, error_msg = load_system()
 
 
-# --- UTILS ---
+# --- 4. UTILS & SPECIAL FUNCTIONS ---
 def get_icon(condition):
-    icons = {
-        "Sunny": "☀️ Sunny / Clear",
-        "Cloudy": "☁️ Cloudy / Overcast",
-        "Rain": "🌧️ Rainy / Stormy",
-        "Snow": "❄️ Snow / Blizzard"
-    }
+    icons = {"Sunny": "☀️ Sunny", "Cloudy": "☁️ Cloudy", "Rain": "🌧️ Rainy", "Snow": "❄️ Snowy"}
     return icons.get(condition, condition)
 
 
@@ -74,7 +85,6 @@ def check_special_date(month, day):
         st.markdown(
             """
             <input type="checkbox" id="close_toast" style="display: none;">
-
             <div class="birthday-toast" style="
                 position: fixed;
                 top: 80px;
@@ -89,47 +99,29 @@ def check_special_date(month, day):
                 box-shadow: 0px 4px 12px rgba(0,0,0,0.3);
                 border: 2px solid white;
             ">
-                <label for="close_toast" style="
-                    cursor: pointer;
-                    float: right;
-                    margin-left: 15px;
-                    font-size: 22px;
-                    line-height: 20px;
-                    color: white;
-                ">
+                <label for="close_toast" style="cursor: pointer; float: right; margin-left: 15px; font-size: 22px; line-height: 20px;">
                     &times;
                 </label>
                 🎂 The most beautiful day in the world 🌍
             </div>
-
             <style>
-                #close_toast:checked + .birthday-toast {
-                    display: none;
-                }
+                #close_toast:checked + .birthday-toast { display: none; }
             </style>
             """,
             unsafe_allow_html=True
         )
 
 
-# --- UI HEADER (CENTERED) ---
-if error_msg:
-    st.error(error_msg)
-    st.stop()
-
-# Title
-st.markdown("<h1 style='text-align: center;'>🌤️ Turkey AI Weather Forecast</h1>", unsafe_allow_html=True)
-st.markdown("""
-<div style='text-align: center;'>
-    <b>Advanced Weather Prediction System:</b> Uses historical data (<b>2003-2025</b>) and Random Forest AI to forecast future conditions.
-</div>
-""", unsafe_allow_html=True)
+# --- 5. HEADER (CENTERED & COMPACT) ---
+st.markdown("<h1 class='main-title'>🌤️ Turkey AI Weather Forecast</h1>", unsafe_allow_html=True)
+st.markdown(
+    "<p class='sub-title'>Advanced Climate Prediction powered by Random Forest AI, leveraging 20+ years of historical meteorological data (2003-2025).</p>",
+    unsafe_allow_html=True)
 st.markdown("---")
 
-# --- MAIN INTERFACE ---
-col1, col2 = st.columns([1, 2])
+# --- 6. MAIN INTERFACE ---
+col1, col2 = st.columns([1, 1])
 
-# Global Map Variables (Default View)
 map_data = locations[['lat', 'lon']]
 map_zoom = 5
 
@@ -144,61 +136,41 @@ with col1:
 
     day = st.number_input("Select Day:", min_value=1, max_value=31, value=15)
 
-    st.markdown("---")
-
-    if st.button("Generate Forecast 🚀", type="primary"):
-        # --- DATA PREPARATION ---
+    if st.button("Generate Forecast 🚀", type="primary", use_container_width=True):
         loc_data = locations[locations['city_name'] == city].iloc[0]
         lat, lon = loc_data['lat'], loc_data['lon']
-
-        # Update Map to Focus on City
         map_data = pd.DataFrame({'lat': [lat], 'lon': [lon]})
         map_zoom = 8
 
-        year = 2026
-
         try:
-            day_of_year = datetime.date(year, month_idx, day).timetuple().tm_yday
-
-            # --- 1. TEMPERATURE ---
-            input_reg = pd.DataFrame([[lat, lon, year, month_idx, day, day_of_year]],
+            day_of_year = datetime.date(2026, month_idx, day).timetuple().tm_yday
+            # Predictions
+            input_reg = pd.DataFrame([[lat, lon, 2026, month_idx, day, day_of_year]],
                                      columns=['lat', 'lon', 'year', 'month', 'day', 'day_of_year'])
             pred_max_temp = reg_model.predict(input_reg)[0]
-
-            # --- 2. CONDITION ---
-            est_min_temp = pred_max_temp - 12.0
-            est_temp_range = 12.0
-
-            input_cls = pd.DataFrame(
-                [[lat, lon, year, month_idx, day_of_year, pred_max_temp, est_min_temp, est_temp_range]],
-                columns=['lat', 'lon', 'year', 'month', 'day_of_year', 'max_temp', 'min_temp', 'temp_range'])
+            input_cls = pd.DataFrame([[lat, lon, 2026, month_idx, day_of_year, pred_max_temp, pred_max_temp - 12, 12]],
+                                     columns=['lat', 'lon', 'year', 'month', 'day_of_year', 'max_temp', 'min_temp',
+                                              'temp_range'])
             pred_cond = class_model.predict(input_cls)[0]
 
-            # --- DISPLAY ---
-            st.success(f"✅ Forecast Results for **{city}**")
+            # Results
+            st.success(f"✅ Forecast for **{city}**")
+            res_c1, res_c2 = st.columns(2)
+            res_c1.metric("🌡️ Max Temp", f"{pred_max_temp:.1f} °C")
+            res_c2.metric("☁️ Condition", get_icon(pred_cond))
 
-            m1, m2 = st.columns(2)
-            m1.metric("🌡️ Max Temperature", f"{pred_max_temp:.1f} °C")
-            m2.metric("☁️ Sky Condition", get_icon(pred_cond))
-
-            # --- SPECIAL MESSAGE ---
             check_special_date(month_idx, day)
-
-        except ValueError:
+        except Exception:
             st.error("❌ Invalid Date!")
+
+    st.markdown("---")
+    st.info(f"""
+    **AI Model Architecture & Performance:**
+    * **Regressor:** Temporal & Geospatial Temp Prediction.
+    * **Classifier:** Sky Condition Mapping (RF).
+    * **Accuracy:** {MODEL_ACCURACY}% | **MAE:** {MODEL_MAE}°C
+    """)
 
 with col2:
     st.markdown("### 🗺️ Location Map")
-
-    # Standard Streamlit Map
     st.map(map_data, zoom=map_zoom)
-
-    st.markdown("---")
-    st.info("""
-    **Model Architecture:**
-    1. **Regression Model:** Predicts maximum temperature based on location & time.
-    2. **Physics Check:** Uses temperature limits to refine predictions.
-    3. **Classification Model:** Determines final weather condition.
-    """)
-
-    st.caption(f"Model Accuracy (Test Set): Temp MAE: {MODEL_MAE}°C | Condition Accuracy: {MODEL_ACCURACY}%")
