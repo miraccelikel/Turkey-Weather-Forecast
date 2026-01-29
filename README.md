@@ -1,4 +1,4 @@
-# 🌤️ Turkey AI Weather Forecast
+# 🌤️ Turkey Weather Forecast
 
 <div align="center">
 
