@@ -1,136 +1,234 @@
 """
-Turkey AI Weather Forecast - Regression Model Training Script
--------------------------------------------------------------
+Turkey Weather Forecast - Multi-Output Regression Training Script
+------------------------------------------------------------------
 Author: Miraç Çelikel
 Description:
-    This script trains a Random Forest Regressor to predict the maximum daily temperature
-    for any given location in Turkey.
+    Trains regressors to predict 7 physical features for a given
+    location and future date. These predictions feed the Classifier.
 
-    It performs the following steps:
-    1. Loads historical weather data (2003-2025).
-    2. Cleans data anomalies (removes unstable 2003 data).
-    3. Engineers time-based features to capture seasonality.
-    4. Trains an optimized Random Forest model.
-    5. Evaluates performance (MAE) and saves the model.
+    Targets: max_temp, min_temp, precipitation, wind_speed,
+             humidity, pressure, radiation
+
+Changes:
+    - Added 'region' feature (Turkey's 7 geographic regions)
+      to improve humidity MAE (coastal vs inland variance)
 """
 
-import pandas as pd
 import os
+import pandas as pd
 import joblib
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_absolute_error
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from catboost import CatBoostRegressor
 
 # --- CONFIGURATION ---
-MODEL_PATH = "temperature_model.pkl"
-CUTOFF_YEAR = 2024  # Train on data before this year, test on this year and after
+MODEL_PATH = "models/temperature_models.pkl"
+CUTOFF_YEAR = 2024
+
+FEATURES = ['lat', 'lon', 'year', 'month', 'day', 'day_of_year', 'region_encoded']
+TARGETS  = ['max_temp', 'min_temp', 'precipitation',
+            'wind_speed', 'humidity', 'pressure', 'radiation']
 
 
 def find_file(filename, folder="data"):
-    """
-    Locates a file whether the script is run from the root or a subfolder.
-    Useful for ensuring the script runs smoothly in different environments.
-    """
-    path1 = os.path.join(folder, filename)  # Standard path
-    path2 = os.path.join("..", folder, filename)  # One level up
-
+    path1 = os.path.join(folder, filename)
+    path2 = os.path.join("..", folder, filename)
     if os.path.exists(path1):
         return path1
     elif os.path.exists(path2):
         return path2
+    return None
+
+
+def assign_region(lat, lon):
+    """
+    Assigns Turkey's 7 standard geographic regions based on coordinates.
+
+    Regions and approximate boundaries:
+    - Karadeniz        : lat > 40.5  (Black Sea coast)
+    - Marmara          : lat > 39.5, lon < 31  (NW Turkey)
+    - Ege              : lon < 29.5, lat < 40.5  (Aegean coast)
+    - Akdeniz          : lat < 37.5, lon < 36  (Mediterranean)
+    - Ic_Anadolu       : central plateau
+    - Dogu_Anadolu     : lon > 38, lat > 37.5
+    - Guneydogu_Anadolu: lon > 36, lat < 37.5
+    """
+    if lat > 40.5:
+        return 'Karadeniz'
+    elif lat > 39.5 and lon < 31:
+        return 'Marmara'
+    elif lon < 29.5 and lat < 40.5:
+        return 'Ege'
+    elif lat < 37.5 and lon < 36:
+        return 'Akdeniz'
+    elif lon > 38 and lat > 37.5:
+        return 'Dogu_Anadolu'
+    elif lon > 36 and lat < 37.5:
+        return 'Guneydogu_Anadolu'
     else:
-        return None
+        return 'Ic_Anadolu'
 
 
 def main():
-    print("Starting Temperature Regression Model Training...")
+    print("=" * 60)
+    print("Turkey Weather Forecast — Multi-Output Regression Training")
+    print("=" * 60)
+    print(f"Targets ({len(TARGETS)}): {TARGETS}\n")
 
+    # ------------------------------------------------------------------
     # 1. Load Data
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
     master_path = find_file("Turkey_Weather_Master.csv")
-    locs_path = find_file("locations.csv")
+    locs_path   = find_file("locations.csv")
 
-    if not master_path or not locs_path:
-        print("Error: Data files not found. Please check the 'data/' directory.")
-        return
-
-    df = pd.read_csv(master_path)
+    df   = pd.read_csv(master_path)
     locs = pd.read_csv(locs_path)
 
-    # Merge coordinates: Latitude and Longitude are critical for temperature prediction
-    # as they dictate climate zones (e.g., coastal vs inland).
-    df = df.merge(locs[['plaka', 'lat', 'lon']], left_on='plate_code', right_on='plaka', how='left')
+    df = df.merge(locs[['plaka', 'lat', 'lon']],
+                  left_on='plate_code', right_on='plaka', how='left')
     df['date'] = pd.to_datetime(df['date'])
 
-    print(f"Data Loaded. Initial Shape: {df.shape}")
-
-    # 2. Preprocessing & Feature Engineering
-    # ---------------------------------------------------------
-    print("Engineering Features...")
-
-    df['year'] = df['date'].dt.year
-    df['month'] = df['date'].dt.month
-    df['day'] = df['date'].dt.day
-
-    # Critical Feature: 'day_of_year' (1 to 365)
-    # This captures the cyclic nature of seasons better than just 'month'.
-    # It helps the model understand that Dec 31 is very close to Jan 1 in terms of temperature.
+    # ------------------------------------------------------------------
+    # 2. Feature Engineering
+    # ------------------------------------------------------------------
+    df['year']        = df['date'].dt.year
+    df['month']       = df['date'].dt.month
+    df['day']         = df['date'].dt.day
     df['day_of_year'] = df['date'].dt.dayofyear
 
-    # Data Cleaning: Filter out 2003
-    # Analysis showed that 2003 data contains missing summer months/anomalies
-    # that negatively impact model accuracy.
-    df = df[df['year'] > 2003]
-    print(f"Filtered out 2003 data. New Shape: {df.shape}")
-
-    # 3. Data Preparation
-    # ---------------------------------------------------------
-    features = ['lat', 'lon', 'year', 'month', 'day', 'day_of_year']
-    target = 'max_temp'
-
-    X = df[features]
-    y = df[target]
-
-    # Time-Based Split
-    # We strictly split by time to prevent "data leakage".
-    # Predicting the past using the future is cheating; we must predict the future using the past.
-    X_train = X[df['year'] < CUTOFF_YEAR]
-    y_train = y[df['year'] < CUTOFF_YEAR]
-    X_test = X[df['year'] >= CUTOFF_YEAR]
-    y_test = y[df['year'] >= CUTOFF_YEAR]
-
-    print(f"Training Set: {len(X_train)} samples | Test Set: {len(X_test)} samples")
-
-    # 4. Model Training
-    # ---------------------------------------------------------
-    print("Training Random Forest Regressor...")
-
-    # Hyperparameters Optimization ("Diet" Random Forest):
-    # - max_depth=12: Limits tree depth to prevent overfitting and keep model size small (<150MB).
-    # - min_samples_leaf=20: Ensures leaf nodes represent general trends, not noise.
-    # - n_jobs=-1: Utilizes all CPU cores for faster training.
-    rf_model = RandomForestRegressor(
-        n_estimators=100,
-        max_depth=12,
-        min_samples_leaf=20,
-        n_jobs=-1,
-        random_state=42
+    # Turkey's 7 geographic regions
+    df['region'] = df.apply(
+        lambda r: assign_region(r['lat'], r['lon']), axis=1
     )
 
-    rf_model.fit(X_train, y_train)
+    le_region = LabelEncoder()
+    df['region_encoded'] = le_region.fit_transform(df['region'])
 
-    # 5. Evaluation
-    # ---------------------------------------------------------
-    y_pred = rf_model.predict(X_test)
-    mae = mean_absolute_error(y_test, y_pred)
+    print("Region distribution:")
+    print(df['region'].value_counts().to_string())
+    print()
 
-    print(f"\nModel Performance (MAE): {mae:.2f} °C")
-    print(f"(On average, the prediction is within {mae:.2f}°C of the actual temperature)")
+    df = df[df['year'] > 2003]
+    df = df.dropna(subset=FEATURES + TARGETS)
 
-    # 6. Save Model
-    # ---------------------------------------------------------
-    joblib.dump(rf_model, MODEL_PATH)
-    print(f"Model saved successfully to '{MODEL_PATH}'")
+    # ------------------------------------------------------------------
+    # 3. Train / Test Split  (temporal)
+    # ------------------------------------------------------------------
+    train_mask = df['year'] < CUTOFF_YEAR
+
+    X_train = df.loc[train_mask,  FEATURES]
+    y_train = df.loc[train_mask,  TARGETS]
+    X_test  = df.loc[~train_mask, FEATURES]
+    y_test  = df.loc[~train_mask, TARGETS]
+
+    print(f"Training set : {len(X_train):,} samples")
+    print(f"Test set     : {len(X_test):,} samples\n")
+
+    # ------------------------------------------------------------------
+    # 4. Model Definitions
+    # ------------------------------------------------------------------
+    models = {
+        "Random Forest": RandomForestRegressor(
+            n_estimators=200,
+            max_depth=12,
+            min_samples_leaf=20,
+            n_jobs=-1,
+            random_state=42
+        ),
+        "Gradient Boosting": MultiOutputRegressor(
+            GradientBoostingRegressor(
+                n_estimators=150,
+                max_depth=6,
+                learning_rate=0.05,
+                subsample=0.8,
+                random_state=42
+            )
+        ),
+        "XGBoost": MultiOutputRegressor(
+            XGBRegressor(
+                n_estimators=200,
+                max_depth=6,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                n_jobs=-1,
+                random_state=42,
+                verbosity=0
+            )
+        ),
+        "LightGBM": MultiOutputRegressor(
+            LGBMRegressor(
+                n_estimators=200,
+                max_depth=6,
+                learning_rate=0.05,
+                n_jobs=-1,
+                random_state=42,
+                verbose=-1
+            )
+        ),
+        "CatBoost": MultiOutputRegressor(
+            CatBoostRegressor(
+                iterations=200,
+                depth=6,
+                learning_rate=0.05,
+                verbose=0,
+                random_state=42
+            )
+        )
+    }
+
+    # ------------------------------------------------------------------
+    # 5. Training Loop
+    # ------------------------------------------------------------------
+    trained_models = {}
+    metrics        = {}
+    per_target_mae = {}
+
+    for name, model in models.items():
+        print(f"{'─' * 40}")
+        print(f"Training  →  {name}")
+
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+
+        y_pred_df    = pd.DataFrame(y_pred, columns=TARGETS)
+        y_test_reset = y_test.reset_index(drop=True)
+
+        target_maes = {}
+        print(f"\n  {'Target':<15} {'MAE':>8}")
+        print(f"  {'─' * 25}")
+        for col in TARGETS:
+            col_mae = mean_absolute_error(y_test_reset[col], y_pred_df[col])
+            target_maes[col] = round(col_mae, 3)
+            print(f"  {col:<15} {col_mae:>8.3f}")
+
+        avg_mae = mean_absolute_error(y_test_reset, y_pred_df)
+        print(f"  {'─' * 25}")
+        print(f"  {'Average':<15} {avg_mae:>8.3f}\n")
+
+        trained_models[name]  = model
+        metrics[name]         = round(avg_mae, 2)
+        per_target_mae[name]  = target_maes
+
+    # ------------------------------------------------------------------
+    # 6. Save — region encoder included for app.py inference
+    # ------------------------------------------------------------------
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    package = {
+        'models':         trained_models,
+        'metrics':        metrics,
+        'per_target_mae': per_target_mae,
+        'features':       FEATURES,
+        'targets':        TARGETS,
+        'region_encoder': le_region,
+    }
+    joblib.dump(package, MODEL_PATH)
+    print("=" * 60)
+    print(f"All regression models saved → '{MODEL_PATH}'")
 
 
 if __name__ == "__main__":

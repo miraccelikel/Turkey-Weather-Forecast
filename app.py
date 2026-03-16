@@ -1,135 +1,164 @@
+"""
+Turkey Weather Forecast - Streamlit App
+----------------------------------------
+Author: Miraç Çelikel
+Description:
+    Two-stage prediction pipeline:
+      1. Regressor  → predicts 7 physical features (temp, humidity, etc.)
+      2. Classifier → predicts weather condition from those features
+
+    'precipitation' is excluded from Classifier input (data leakage).
+    Region feature is encoded at inference using the saved LabelEncoder.
+"""
+
 import streamlit as st
 import pandas as pd
 import joblib
 import os
 import datetime
-import time
 
-# --- CONFIGURATION ---
+# --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Turkey AI Weather Forecast",
+    page_title="Turkey Weather Forecast",
     page_icon="🌤️",
     layout="wide"
 )
 
-# --- MAP & TITLE CSS ---
+# --- 2. UI CUSTOMIZATION ---
 st.markdown("""
 <style>
-    .stDeckGlJsonChart {
-        height: 500px !important;
-    }
-    .centered-title {
-        text-align: center;
-        font-weight: bold;
-        color: #ff4b4b; /* Streamlit kırmızısı */
-    }
-    .centered-text {
-        text-align: center;
-        font-size: 1.1rem;
-    }
+    .block-container { padding-top: 1rem !important; padding-bottom: 0rem !important; }
+    div.stMarkdown { margin-bottom: -10px !important; }
+    hr { margin-top: 0px !important; margin-bottom: 15px !important; }
+    [data-testid="stMap"] { height: 350px !important; border-radius: 12px; }
+    .main-title { text-align: center; color: #ff4b4b; margin-bottom: 0px; padding-bottom: 0px; }
+    .sub-title  { text-align: center; color: #555; font-size: 0.95rem; margin-top: -5px; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- MODEL METADATA (CONSTANTS) ---
-MODEL_MAE = 3.57
-MODEL_ACCURACY = 60.83
+# --- 3. CONSTANTS ---
+REGRESSOR_FILE  = "models/temperature_models.pkl"
+CLASSIFIER_FILE = "models/weather_classifiers.pkl"
+LOCATION_FILE   = "data/locations.csv"
 
-# File Paths
-REGRESSOR_FILE = "temperature_model.pkl"
-CLASSIFIER_FILE = "weather_classifier.pkl"
-LOCATION_FILE = "data/locations.csv"
+CLF_FEATURES_FALLBACK = [
+    'lat', 'lon', 'year', 'month', 'day_of_year',
+    'max_temp', 'min_temp', 'temp_range',
+    'wind_speed', 'humidity', 'pressure', 'radiation'
+]
+REG_FEATURES_FALLBACK = ['lat', 'lon', 'year', 'month', 'day', 'day_of_year', 'region_encoded']
+REG_TARGETS_FALLBACK  = ['max_temp', 'min_temp', 'precipitation',
+                          'wind_speed', 'humidity', 'pressure', 'radiation']
 
 
-# --- SYSTEM LOADER ---
+# --- 4. REGION HELPER (mirrors training_regressor.py) ---
+def assign_region(lat, lon):
+    if lat > 40.5:
+        return 'Karadeniz'
+    elif lat > 39.5 and lon < 31:
+        return 'Marmara'
+    elif lon < 29.5 and lat < 40.5:
+        return 'Ege'
+    elif lat < 37.5 and lon < 36:
+        return 'Akdeniz'
+    elif lon > 38 and lat > 37.5:
+        return 'Dogu_Anadolu'
+    elif lon > 36 and lat < 37.5:
+        return 'Guneydogu_Anadolu'
+    else:
+        return 'Ic_Anadolu'
+
+
+# --- 5. MODEL LOADER ---
 @st.cache_resource
 def load_system():
     if not os.path.exists(REGRESSOR_FILE) or not os.path.exists(CLASSIFIER_FILE):
-        return None, None, None, "❌ Error: Model files not found."
-
+        return None, None, None, "❌ Error: ML Models not found in 'models/' directory. Please run training scripts."
     try:
-        reg = joblib.load(REGRESSOR_FILE)
-        clf = joblib.load(CLASSIFIER_FILE)
+        reg_package = joblib.load(REGRESSOR_FILE)
+        clf_package = joblib.load(CLASSIFIER_FILE)
         locs = pd.read_csv(LOCATION_FILE).sort_values('city_name')
-        return reg, clf, locs, None
+        return reg_package, clf_package, locs, None
     except Exception as e:
         return None, None, None, f"❌ System Error: {e}"
 
 
-reg_model, class_model, locations, error_msg = load_system()
+reg_data, clf_data, locations, error_msg = load_system()
+
+if error_msg:
+    st.error(error_msg)
+    st.stop()
+
+reg_features  = reg_data.get('features', REG_FEATURES_FALLBACK)
+reg_targets   = reg_data.get('targets',  REG_TARGETS_FALLBACK)
+clf_features  = clf_data.get('features', CLF_FEATURES_FALLBACK)
+le_region     = reg_data.get('region_encoder', None)
 
 
-# --- UTILS ---
+# --- 6. HELPERS ---
 def get_icon(condition):
-    icons = {
-        "Sunny": "☀️ Sunny / Clear",
-        "Cloudy": "☁️ Cloudy / Overcast",
-        "Rain": "🌧️ Rainy / Stormy",
-        "Snow": "❄️ Snow / Blizzard"
-    }
-    return icons.get(condition, condition)
+    return {
+        "Sunny":  "☀️ Sunny",
+        "Cloudy": "☁️ Cloudy",
+        "Rain":   "🌧️ Rainy",
+        "Snow":   "❄️ Snowy"
+    }.get(condition, condition)
+
+
+def get_rain_detail(pred_precip):
+    """Breaks Rain into intensity levels using regressor's precipitation output."""
+    if pred_precip < 2.5:
+        return "🌦️ Light Rain"
+    elif pred_precip < 10:
+        return "🌧️ Moderate Rain"
+    else:
+        return "⛈️ Heavy Rain"
 
 
 def check_special_date(month, day):
+    """Displays a custom styled birthday toast without an icon and with a specific color."""
     if month == 8 and day == 22:
         st.markdown(
-            """
-            <input type="checkbox" id="close_toast" style="display: none;">
-
-            <div class="birthday-toast" style="
+            f"""
+            <div style="
                 position: fixed;
                 top: 80px;
                 right: 20px;
-                background-color: #FF4B4B;
+                background-color: palevioletred;
                 color: white;
                 padding: 15px 25px;
                 border-radius: 12px;
-                font-size: 18px;
+                font-size: 16px;
                 font-weight: bold;
                 z-index: 9999;
-                box-shadow: 0px 4px 12px rgba(0,0,0,0.3);
-                border: 2px solid white;
+                box-shadow: 0px 4px 12px rgba(0,0,0,0.2);
+                border: none;
+                animation: fade-in-out 5s ease-in-out forwards;
             ">
-                <label for="close_toast" style="
-                    cursor: pointer;
-                    float: right;
-                    margin-left: 15px;
-                    font-size: 22px;
-                    line-height: 20px;
-                    color: white;
-                ">
-                    &times;
-                </label>
                 🎂 The most beautiful day in the world 🌍
             </div>
-
             <style>
-                #close_toast:checked + .birthday-toast {
-                    display: none;
-                }
+                @keyframes fade-in-out {{
+                    0% {{ opacity: 0; transform: translateY(-20px); }}
+                    10% {{ opacity: 1; transform: translateY(0); }}
+                    90% {{ opacity: 1; }}
+                    100% {{ opacity: 0; display: none; }}
+                }}
             </style>
             """,
             unsafe_allow_html=True
         )
 
 
-# --- UI HEADER (CENTERED) ---
-if error_msg:
-    st.error(error_msg)
-    st.stop()
-
-# Title
-st.markdown("<h1 style='text-align: center;'>🌤️ Turkey AI Weather Forecast</h1>", unsafe_allow_html=True)
-st.markdown("""
-<div style='text-align: center;'>
-    <b>Advanced Weather Prediction System:</b> Uses historical data (<b>2003-2025</b>) and Random Forest AI to forecast future conditions.
-</div>
-""", unsafe_allow_html=True)
+# --- 7. HEADER ---
+st.markdown("<h1 class='main-title'>🌤️ Turkey Weather Forecast</h1>", unsafe_allow_html=True)
+st.markdown("<p class='sub-title'>Advanced Climate Prediction powered by Ensemble Boosting AI.</p>",
+            unsafe_allow_html=True)
 st.markdown("---")
 
-# --- MAIN INTERFACE ---
-col1, col2 = st.columns([1, 2])
+# --- 8. MAIN INTERFACE ---
+col1, col2 = st.columns([1, 1])
 
-# Global Map Variables (Default View)
 map_data = locations[['lat', 'lon']]
 map_zoom = 5
 
@@ -139,66 +168,113 @@ with col1:
     city = st.selectbox("📍 Select City:", locations['city_name'].unique())
 
     months = {i: datetime.date(2000, i, 1).strftime('%B') for i in range(1, 13)}
-    month_name = st.selectbox("📅 Select Month:", list(months.values()))
+    col1_a, col1_b = st.columns(2)
+    with col1_a:
+        month_name = st.selectbox("📅 Select Month:", list(months.values()))
+    with col1_b:
+        day = st.number_input("📅 Select Day:", min_value=1, max_value=31, value=15)
+
     month_idx = list(months.keys())[list(months.values()).index(month_name)]
 
-    day = st.number_input("Select Day:", min_value=1, max_value=31, value=15)
+    available_models    = list(reg_data['models'].keys())
+    selected_model_name = st.selectbox("🧠 Select ML Model:", available_models, index=0)
 
-    st.markdown("---")
+    if st.button("Generate Forecast 🚀", type="primary", use_container_width=True):
 
-    if st.button("Generate Forecast 🚀", type="primary"):
-        # --- DATA PREPARATION ---
         loc_data = locations[locations['city_name'] == city].iloc[0]
         lat, lon = loc_data['lat'], loc_data['lon']
-
-        # Update Map to Focus on City
         map_data = pd.DataFrame({'lat': [lat], 'lon': [lon]})
         map_zoom = 8
 
-        year = 2026
-
         try:
-            day_of_year = datetime.date(year, month_idx, day).timetuple().tm_yday
+            day_of_year = datetime.date(2026, month_idx, day).timetuple().tm_yday
 
-            # --- 1. TEMPERATURE ---
-            input_reg = pd.DataFrame([[lat, lon, year, month_idx, day, day_of_year]],
-                                     columns=['lat', 'lon', 'year', 'month', 'day', 'day_of_year'])
-            pred_max_temp = reg_model.predict(input_reg)[0]
+            reg_model     = reg_data['models'][selected_model_name]
+            clf_model     = clf_data['models'][selected_model_name]
+            label_encoder = clf_data['label_encoder']
 
-            # --- 2. CONDITION ---
-            est_min_temp = pred_max_temp - 12.0
-            est_temp_range = 12.0
+            # ----------------------------------------------------------
+            # Stage 1 — Regressor: predict 7 physical features
+            # ----------------------------------------------------------
+            region_name = assign_region(lat, lon)
+            region_enc  = le_region.transform([region_name])[0] if le_region else 0
 
+            input_reg = pd.DataFrame(
+                [[lat, lon, 2026, month_idx, day, day_of_year, region_enc]],
+                columns=reg_features
+            )
+            pred_values = reg_model.predict(input_reg)[0]
+
+            pred_map       = dict(zip(reg_targets, pred_values))
+            pred_max_temp  = pred_map['max_temp']
+            pred_min_temp  = pred_map['min_temp']
+            pred_precip    = pred_map['precipitation']
+            pred_wind      = pred_map['wind_speed']
+            pred_humidity  = pred_map['humidity']
+            pred_pressure  = pred_map['pressure']
+            pred_radiation = pred_map['radiation']
+            pred_temp_range = pred_max_temp - pred_min_temp
+
+            # ----------------------------------------------------------
+            # Stage 2 — Classifier: predict weather condition
+            # 'precipitation' intentionally excluded (data leakage)
+            # ----------------------------------------------------------
             input_cls = pd.DataFrame(
-                [[lat, lon, year, month_idx, day_of_year, pred_max_temp, est_min_temp, est_temp_range]],
-                columns=['lat', 'lon', 'year', 'month', 'day_of_year', 'max_temp', 'min_temp', 'temp_range'])
-            pred_cond = class_model.predict(input_cls)[0]
+                [[lat, lon, 2026, month_idx, day_of_year,
+                  pred_max_temp, pred_min_temp, pred_temp_range,
+                  pred_wind, pred_humidity, pred_pressure, pred_radiation]],
+                columns=clf_features
+            )
 
-            # --- DISPLAY ---
-            st.success(f"✅ Forecast Results for **{city}**")
+            pred_cond_num = clf_model.predict(input_cls)[0]
+            pred_cond     = label_encoder.inverse_transform([pred_cond_num])[0]
 
-            m1, m2 = st.columns(2)
-            m1.metric("🌡️ Max Temperature", f"{pred_max_temp:.1f} °C")
-            m2.metric("☁️ Sky Condition", get_icon(pred_cond))
+            # Rain intensity via regressor's precipitation output
+            display_cond = get_rain_detail(pred_precip) if pred_cond == "Rain" else get_icon(pred_cond)
 
-            # --- SPECIAL MESSAGE ---
+            # ----------------------------------------------------------
+            # Results
+            # ----------------------------------------------------------
+            st.success(f"✅ Forecast for **{city}** · {region_name} · **{selected_model_name}**")
+
+            res_c1, res_c2, res_c3 = st.columns(3)
+            res_c1.metric("🌡️ Max Temp",  f"{pred_max_temp:.1f} °C")
+            res_c2.metric("🌡️ Min Temp",  f"{pred_min_temp:.1f} °C")
+            res_c3.metric("☁️ Condition", display_cond)
+
+            with st.expander("🔍 View AI Physics Predictions (Under the Hood)"):
+                ph1, ph2, ph3, ph4, ph5 = st.columns(5)
+                ph1.metric("💧 Humidity",   f"{pred_humidity:.1f} %")
+                ph2.metric("🔵 Pressure",   f"{pred_pressure:.1f} hPa")
+                ph3.metric("💨 Wind",       f"{pred_wind:.1f} km/h")
+                ph4.metric("☀️ Radiation",  f"{pred_radiation:.2f} MJ/m²")
+                ph5.metric("🌧️ Precip.",   f"{pred_precip:.1f} mm")
+
             check_special_date(month_idx, day)
 
-        except ValueError:
-            st.error("❌ Invalid Date!")
+        except ValueError as ve:
+            st.error(f"❌ Invalid date: {ve}")
+        except Exception as e:
+            st.error(f"❌ Prediction failed: {e}")
 
 with col2:
     st.markdown("### 🗺️ Location Map")
-
-    # Standard Streamlit Map
     st.map(map_data, zoom=map_zoom)
 
-    st.markdown("---")
-    st.info("""
-    **Model Architecture:**
-    1. **Regression Model:** Predicts maximum temperature based on location & time.
-    2. **Physics Check:** Uses temperature limits to refine predictions.
-    3. **Classification Model:** Determines final weather condition.
-    """)
+# --- 9. MODEL PERFORMANCE ---
+st.markdown("---")
+st.subheader("📊 ML Models Performance Comparison")
+st.markdown("Evaluation on held-out test data (2024 and onwards).")
 
-    st.caption(f"Model Accuracy (Test Set): Temp MAE: {MODEL_MAE}°C | Condition Accuracy: {MODEL_ACCURACY}%")
+perf_df = pd.DataFrame({
+    "AI Algorithm":       list(reg_data['metrics'].keys()),
+    "Regression Avg MAE": list(reg_data['metrics'].values()),
+    "Weather Accuracy %": list(clf_data['metrics'].values())
+})
+st.dataframe(perf_df, use_container_width=True, hide_index=True)
+
+if 'per_target_mae' in reg_data:
+    with st.expander("🔬 Per-Target MAE Breakdown"):
+        per_target_df = pd.DataFrame(reg_data['per_target_mae']).T
+        per_target_df.index.name = "Model"
+        st.dataframe(per_target_df, use_container_width=True)
