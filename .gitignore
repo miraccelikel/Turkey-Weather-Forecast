@@ -57,3 +57,5 @@ Thumbs.db
 # --- Data & Logs ---
 *.log
 .cache/
+# --- CatBoost ---
+catboost_info/
