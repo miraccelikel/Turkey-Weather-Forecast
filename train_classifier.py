@@ -102,7 +102,7 @@ def main():
     # Sanity check — unexpected codes
     unknown_mask = df['weather_simple'] == 'Unknown'
     if unknown_mask.any():
-        print(f"\n⚠️  WARNING: {unknown_mask.sum()} rows with unmapped weather_code!")
+        print(f"\nWARNING: {unknown_mask.sum()} rows with unmapped weather_code!")
         print(df.loc[unknown_mask, 'weather_code'].value_counts())
         df = df[~unknown_mask].copy()
 
